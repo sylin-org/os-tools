@@ -10,8 +10,9 @@
 //! elevation/authorization). [`Scope::CurrentUser`] uses the user's default keychain with
 //! user-domain trust (no `-d`, no elevation).
 
-use std::io::Write as _;
-use std::process::Command;
+use std::io::{Read as _, Write as _};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use tempfile::NamedTempFile;
 
@@ -20,6 +21,47 @@ use crate::error::{Result, TrustError};
 use crate::{Report, Scope};
 
 const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
+
+/// Bound on a trust-mutating `security` call. A headless macOS context pops an interactive
+/// authorization/keychain prompt that never returns, so anything slower than this is
+/// treated as that blocked prompt rather than hanging forever.
+const SECURITY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a `security` command with [`SECURITY_TIMEOUT`]; on timeout, kill it and report
+/// [`TrustError::InteractiveAuthRequired`] (the headless trust-prompt case).
+fn run_with_timeout(mut cmd: Command) -> Result<Output> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + SECURITY_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            // Exited; drain the (small) pipes. `security` output is a few lines, so reading
+            // after exit cannot deadlock on a full pipe buffer.
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut o) = child.stdout.take() {
+                let _ = o.read_to_end(&mut stdout);
+            }
+            if let Some(mut e) = child.stderr.take() {
+                let _ = e.read_to_end(&mut stderr);
+            }
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(TrustError::InteractiveAuthRequired);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
 
 /// Write the PEM to a race-free temp file (random name, `O_EXCL`) for the `security` CLI.
 /// The returned handle deletes the file when dropped.
@@ -67,7 +109,7 @@ pub fn install(cert: &Cert, scope: Scope, label: Option<&str>) -> Result<Report>
         cmd.args(["-d", "-k", SYSTEM_KEYCHAIN]);
     }
     cmd.args(["-r", "trustRoot"]).arg(pem.path());
-    let output = cmd.output();
+    let output = run_with_timeout(cmd);
     drop(pem); // remove the temp file regardless of result
     let output = output?;
 
@@ -101,7 +143,11 @@ pub fn is_installed(cert: &Cert, scope: Scope) -> Result<bool> {
     if let Some(kc) = keychain(scope) {
         cmd.arg(kc);
     }
-    let output = cmd.output()?;
+    // A read shouldn't prompt, but bound it anyway so it can never hang; if the store
+    // can't be read (timeout or spawn error), treat the cert as absent (best-effort).
+    let Ok(output) = run_with_timeout(cmd) else {
+        return Ok(false);
+    };
     if !output.status.success() {
         return Ok(false);
     }
@@ -128,7 +174,7 @@ pub fn uninstall(cert: &Cert, scope: Scope) -> Result<()> {
         cmd.arg("-d");
     }
     cmd.arg(pem.path());
-    let output = cmd.output();
+    let output = run_with_timeout(cmd);
     drop(pem);
     let output = output?;
     if output.status.success() {

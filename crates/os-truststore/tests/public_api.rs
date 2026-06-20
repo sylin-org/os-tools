@@ -97,13 +97,14 @@ fn uninstall_of_absent_cert_is_idempotent() {
 }
 
 #[test]
-fn install_builder_surface() {
+fn install_builder_constructs() {
+    // Exercise the builder's fluent surface WITHOUT a real install: `run()` can block on a
+    // headless macOS trust prompt. The run path is covered by `install()` above and the
+    // crate's `no_run` doctest.
     let c = ca("Builder Root");
-    // Exercise the builder (no success assertion — may require privilege).
-    let _ = Install::new(&c)
+    let _builder = Install::new(&c)
         .scope(Scope::CurrentUser)
-        .label("Builder Root")
-        .run();
+        .label("Builder Root");
 }
 
 #[cfg(feature = "rustls")]
