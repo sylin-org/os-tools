@@ -21,7 +21,7 @@ sha2 = "0.10"
 rcgen = "0.13"
 # Platform / feature-gated (used per-target or behind a feature in member crates).
 libc = "0.2"
-which = "6"
+which = "8"
 schannel = "0.1"
 tempfile = "3"
 # default-features off: RootCertStore + pki_types need no crypto provider, so a consumer
