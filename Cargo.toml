@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/os-truststore"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Sylin.org <hello@sylin.org>"]
+edition = "2021"
+rust-version = "1.74"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/sylin-org/os-tools"
+homepage = "https://github.com/sylin-org/os-tools"
+
+# Shared external dependencies — single version pin across the family.
+[workspace.dependencies]
+tracing = "0.1"
+thiserror = "2"
+pem = "3"
+x509-parser = "0.16"
+rcgen = "0.13"

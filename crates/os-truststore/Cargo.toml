@@ -1,0 +1,22 @@
+[package]
+name = "os-truststore"
+description = "One symmetric API for installing and removing CA certificates in the operating system's trust store, across Windows, macOS, and Linux."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["truststore", "certificate", "tls", "ca", "ca-certificates"]
+categories = ["cryptography", "os"]
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+pem.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
