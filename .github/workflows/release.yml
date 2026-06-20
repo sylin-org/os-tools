@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Dry run: validates prepare + test without creating a release or publishing.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Prepare ───────────────────────────────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      description: ${{ steps.meta.outputs.description }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version metadata
+        id: meta
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          TAG="v${VERSION}"
+          # Release description is the body of the latest CHANGELOG.md section
+          # (everything between the first "## [" heading and the next one).
+          DESCRIPTION=$(awk '/^## \[/{c++; if(c==2) exit; next} c==1' CHANGELOG.md)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "description<<__OST_EOF__"
+            echo "$DESCRIPTION"
+            echo "__OST_EOF__"
+          } >> "$GITHUB_OUTPUT"
+          echo "Tag: $TAG"
+          echo "Version: $VERSION"
+
+  # ── Test ──────────────────────────────────────────────────────────
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - name: Test
+        run: cargo test --all-features --locked
+
+  # ── Release ───────────────────────────────────────────────────────
+  # os-tools is a library workspace: a release is a GitHub Release (notes from the
+  # CHANGELOG) plus a crates.io publish — there is no binary to cross-build/package.
+  release:
+    needs: [prepare, test]
+    # Only create a GitHub Release on a real tag push; workflow_dispatch stops after test.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate release notes
+        shell: bash
+        env:
+          # Pass via env: — env values are not re-parsed by bash, so backticks / $() in
+          # the CHANGELOG body cannot trigger command substitution.
+          VERSION: ${{ needs.prepare.outputs.tag }}
+          CRATE_VERSION: ${{ needs.prepare.outputs.version }}
+          DESCRIPTION: ${{ needs.prepare.outputs.description }}
+        run: |
+          TEMPLATE=$(cat .github/release-template.md)
+          NOTES="${TEMPLATE//\$\{VERSION\}/$VERSION}"
+          NOTES="${NOTES//\$\{CRATE_VERSION\}/$CRATE_VERSION}"
+          NOTES="${NOTES//\$\{DESCRIPTION\}/$DESCRIPTION}"
+          echo "$NOTES" > release-notes.md
+          echo "--- Release notes ---"
+          cat release-notes.md
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
+
+  # ── Publish to crates.io ──────────────────────────────────────────
+  # Runs only after the GitHub Release succeeds (which requires tests to pass) and only on
+  # a real tag push — so a broken tag never reaches the irreversible crates.io publish, and
+  # the workflow_dispatch dry run never publishes. Reuses publish.yml.
+  publish-crates:
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: ./.github/workflows/publish.yml
+    secrets: inherit

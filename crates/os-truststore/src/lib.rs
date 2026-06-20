@@ -233,20 +233,7 @@ mod tests {
         assert!(b.label.is_none());
     }
 
-    /// Full install → verify → remove round-trip against the REAL OS trust store. Mutates
-    /// the system store and needs elevation; run explicitly on a machine where that is
-    /// safe: `cargo test -p os-truststore -- --ignored`.
-    #[test]
-    #[ignore = "mutates the OS trust store; needs admin/root"]
-    fn install_verify_remove_round_trip() {
-        let ca = gen_ca();
-        let report = install(&ca).expect("install should succeed with privileges");
-        assert!(matches!(
-            report,
-            Report::Installed | Report::AlreadyInstalled | Report::InstalledNotTrusted { .. }
-        ));
-        assert!(is_installed(&ca).expect("query should succeed"));
-        uninstall(&ca).expect("remove should succeed");
-        assert!(!is_installed(&ca).expect("query should succeed"));
-    }
+    // The real install → verify → remove round-trip (which mutates the OS store and needs
+    // elevation) lives in tests/roundtrip.rs as an `#[ignore]`d, rcgen-free integration
+    // test so the distro-container CI job can run it with only a Rust toolchain.
 }

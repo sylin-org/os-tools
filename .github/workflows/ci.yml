@@ -8,60 +8,92 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+
+# Least privilege: every job only reads the repo.
+permissions:
+  contents: read
 
 jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+      - name: Build
+        run: cargo build --all-features --locked
+      - name: Test
+        run: cargo test --all-features --locked
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
   fmt:
-    name: rustfmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - name: Format check
+        run: cargo fmt --check
 
-  clippy:
-    name: clippy (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        # macos-latest = Apple Silicon, macos-13 = Intel.
-        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-features --locked
-
-  msrv:
-    name: minimum supported Rust version
+  features:
+    name: feature matrix (default + rustls)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.78.0
-      - run: cargo check --all-features --locked
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Default (lean): the `rustls` dependency is not pulled at all.
+      - name: Build (default features)
+        run: cargo build --locked
+      # With the in-process trust helper.
+      - name: Build (rustls feature)
+        run: cargo build --locked --features rustls
 
-  # Exercise the REAL Linux install round-trip (the #[ignore]d test) as root in each
-  # distro family — the cross-distro proof of the exhaust-all-methods orchestrator.
-  # alpine (musl rustup) and openSUSE (Tier-3 anchor-dir, see docs/PRIOR-ART.md) are
-  # allowed to fail until verified; Debian/Fedora/Arch gate.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.78
+      - uses: Swatinem/rust-cache@v2
+      - name: Check (MSRV)
+        run: cargo check --all-features --locked
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit
+        run: cargo audit
+
+  # Cross-distro proof: run the REAL install round-trip (the #[ignore]d test) as root in
+  # each Linux family — the os-truststore equivalent of an end-to-end integration job.
+  # The round-trip test is rcgen-free (static CA fixture), so the containers need only a
+  # Rust toolchain + the distro trust tooling, no C compiler. alpine (musl) and openSUSE
+  # (Tier-3 anchor dir, see docs/PRIOR-ART.md) are allowed to fail until verified.
   linux-distros:
     name: distro (${{ matrix.image }})
+    needs: [test, clippy]
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     continue-on-error: ${{ matrix.experimental || false }}
@@ -70,16 +102,16 @@ jobs:
       matrix:
         include:
           - image: debian:stable
-            setup: apt-get update && apt-get install -y ca-certificates curl gcc
+            setup: apt-get update && apt-get install -y ca-certificates curl
           - image: fedora:latest
-            setup: dnf install -y ca-certificates curl gcc
+            setup: dnf install -y ca-certificates curl
           - image: archlinux:latest
-            setup: pacman -Sy --noconfirm ca-certificates p11-kit curl gcc
+            setup: pacman -Sy --noconfirm ca-certificates p11-kit curl
           - image: alpine:latest
-            setup: apk add --no-cache ca-certificates curl build-base
+            setup: apk add --no-cache ca-certificates curl
             experimental: true
           - image: opensuse/tumbleweed:latest
-            setup: zypper --non-interactive install ca-certificates curl gcc tar gzip
+            setup: zypper --non-interactive install ca-certificates curl tar gzip
             experimental: true
     steps:
       - uses: actions/checkout@v4
@@ -92,5 +124,5 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         shell: sh
       - name: Real install round-trip (running as root in the container)
-        run: . "$HOME/.cargo/env" && cargo test --locked -- --include-ignored
+        run: . "$HOME/.cargo/env" && cargo test --test roundtrip --locked -- --include-ignored
         shell: sh
