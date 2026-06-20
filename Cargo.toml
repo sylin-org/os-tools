@@ -6,7 +6,7 @@ members = ["crates/os-truststore"]
 version = "0.1.0"
 authors = ["Sylin.org <hello@sylin.org>"]
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.78"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/sylin-org/os-tools"
 homepage = "https://github.com/sylin-org/os-tools"
@@ -17,4 +17,13 @@ tracing = "0.1"
 thiserror = "2"
 pem = "3"
 x509-parser = "0.16"
+sha2 = "0.10"
 rcgen = "0.13"
+# Platform / feature-gated (used per-target or behind a feature in member crates).
+libc = "0.2"
+which = "6"
+schannel = "0.1"
+tempfile = "3"
+# default-features off: RootCertStore + pki_types need no crypto provider, so a consumer
+# enabling the `rustls` feature does not inherit aws-lc-rs's C/cmake build dependency.
+rustls = { version = "0.23", default-features = false }

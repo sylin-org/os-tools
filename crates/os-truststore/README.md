@@ -24,58 +24,102 @@ copies — structurally symmetric, mechanically alien.
 
 ## Usage
 
+The certificate **is** the identity — install, query, and remove with the same `Cert`; the
+crate derives a stable identity (SHA-256 of the DER) internally. No names to invent.
+
 ```rust
-let pem = std::fs::read_to_string("my-root-ca.pem")?;
+let bytes = std::fs::read("my-root-ca.pem")?;
+let ca = os_truststore::Cert::from_pem(&bytes)?;   // validates "is this a CA?" up front
 
-// Validates that the PEM is actually a CA certificate (rejects a leaf/server cert).
-let parsed = os_truststore::parse_ca_cert(&pem)?;
-
-// Installing into the system trust store requires elevated privileges.
-os_truststore::install_ca_cert(&parsed.pem, "my-org-root")?;
-
-assert!(os_truststore::is_ca_installed("my-org-root"));
-
-os_truststore::remove_ca_cert("my-org-root")?;
+os_truststore::install(&ca)?;                        // system store (needs elevation)
+assert!(os_truststore::is_installed(&ca)?);
+os_truststore::uninstall(&ca)?;                      // Ok even if already absent
 ```
 
-Installing into the **system** trust store requires elevated privileges (Administrator /
-`sudo` / admin). Errors are **returned, never panicked** — a caller can warn and continue
-when the store cannot be modified.
+Options via the builder:
+
+```rust
+use os_truststore::{Install, Scope};
+
+Install::new(&ca)
+    .scope(Scope::CurrentUser)   // no-elevation per-user install (Windows/macOS)
+    .label("My Org Root")        // display name where the platform supports one
+    .run()?;
+```
+
+- **Idempotent** — re-installing returns `Ok(Report::AlreadyInstalled)`; uninstalling an
+  absent cert is `Ok(())`.
+- **Never silently under-delivers** — the default scope is `System`; without elevation you
+  get a typed `TrustError::NeedsElevation` (with the manual remedy), never a quiet per-user
+  install. Partial success on macOS surfaces as `Report::InstalledNotTrusted { reason }`.
+- **Typed, actionable errors**, never a panic: `NotCaCertificate`, `StoreNotFound`,
+  `StoreToolMissing { hint }`, `NeedsElevation`, `InteractiveAuthRequired`,
+  `CommandFailed { stderr }`.
+
+### Trust in-process — no elevation, no OS store (the `rustls` feature)
+
+If you only need *your own* `rustls`/`reqwest` client to trust the CA, skip the OS store
+entirely. This works on every platform with no privileges:
+
+```rust
+// os-truststore = { version = "0.1", features = ["rustls"] }
+let roots = os_truststore::inprocess::rustls_root_store(&ca)?;
+let config = rustls::ClientConfig::builder()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+```
+
+For `reqwest`, use its own API directly: `reqwest::Certificate::from_der(ca.der())` then
+`ClientBuilder::add_root_certificate(...)`.
 
 ## Platform support
 
 `os-truststore` uses an explicit, honest support-tier model — we state what is verified
-rather than implying uniform coverage.
+rather than implying uniform coverage. (Full per-version detail + citations:
+[docs/PRIOR-ART.md](https://github.com/sylin-org/os-tools/blob/main/docs/PRIOR-ART.md).)
 
 | Platform | Mechanism | Tier |
 | --- | --- | --- |
-| Windows 11 | `certutil -addstore Root` | **1** — developed on + hands-on verified |
-| Linux (Debian / Ubuntu) | `/usr/local/share/ca-certificates/` + `update-ca-certificates` | **1** — developed on + hands-on verified |
-| macOS | `security add-trusted-cert` (System keychain) | **2** — compiles + unit-tested in CI; store mutation not yet hands-on verified |
-| Other Linux (RHEL/Fedora, Arch, openSUSE, Alpine) | *see roadmap* | **3** — planned (from the mkcert / `smallstep/truststore` reference) |
+| Windows (LocalMachine / CurrentUser `ROOT`) | native CryptoAPI via [`schannel`](https://crates.io/crates/schannel) | **1** |
+| Linux — Debian/Ubuntu | `/usr/local/share/ca-certificates/` + `update-ca-certificates` | **1** |
+| Linux — RHEL/Fedora/CentOS/Rocky/Alma | `/etc/pki/ca-trust/source/anchors/` + `update-ca-trust extract` | **2** |
+| Linux — Arch/Manjaro | `/etc/ca-certificates/trust-source/anchors/` + `trust extract-compat` | **2** |
+| Linux — Alpine/musl | same as Debian; minimal images without the tool → `StoreToolMissing` | **2** |
+| macOS | `security add-trusted-cert` + read-back verification | **2** |
+| Linux — openSUSE/SLE | `/etc/pki/trust/anchors/` + `update-ca-certificates` | **3** |
 
-- **Tier 1** — developed on and verified by hand; gated in CI.
-- **Tier 2** — compiles and unit-tests in CI; real store mutation (which needs elevation)
-  is not yet automatically exercised.
-- **Tier 3** — planned / implemented from a reference algorithm, community-verified.
+- **Tier 1** — developed on and hands-on verified.
+- **Tier 2** — implemented + compiled/tested in CI; real store mutation may need a privileged
+  runner.
+- **Tier 3** — implemented from the reference, needs hands-on confirmation (openSUSE's admin
+  anchor dir is a known reference contradiction — see PRIOR-ART.md).
+
+**Linux detection** reads `/etc/os-release` first, then falls back to directory existence,
+so derivatives and minimal containers resolve correctly. The refresh tool must be present
+(else a loud `StoreToolMissing` with the install hint) — never a silent no-op.
+
+**macOS reality:** root sufficed for headless trust only through 10.15. Big Sur+ requires
+interactive authorization, and 14.7.5+/15.x make unattended admin trust effectively
+MDM-only. We add the cert, verify by read-back, and report `InstalledNotTrusted` /
+`InteractiveAuthRequired` honestly rather than claiming silent system trust.
 
 > The end-to-end install/remove round-trip mutates the real OS trust store and needs
 > elevation, so it is `#[ignore]`-d by default. Run it explicitly on a machine where that
 > is safe: `cargo test -p os-truststore -- --ignored`.
 
-## Roadmap
+## Not in scope (yet)
 
-`os-truststore` is `0.1.0` — the cross-platform surface is in place; breadth lands next
-(tracked in [CHANGELOG](../../CHANGELOG.md)):
+NSS (Firefox/Chrome) and Java keystores are *separate* trust stores from the OS store.
+They are deliberately out of scope for now and will be opt-in, soft-fail backends behind
+features in a later release — for machine-to-machine TLS (OpenSSL/rustls/Go) they are not
+needed.
 
-- **Linux, exhaustively** — p11-kit `trust anchor`, RHEL/Fedora `update-ca-trust`, Arch
-  `trust extract-compat`, openSUSE, and a busybox/musl consolidated-bundle fallback, with
-  a loud structured error when no method is available (never a silent no-op).
-- **Windows native** — the `schannel` API in place of shelling out to `certutil`.
-- **In-process trust** (`rustls` feature) — hand back a `rustls` `RootCertStore` /
-  `reqwest` client that trusts a CA without touching the OS store: the privilege-free floor
-  for clients you control.
-- **NSS / Java** keystores behind optional features.
+## Credit
+
+Approach informed by [mkcert](https://github.com/FiloSottile/mkcert) and
+[smallstep/truststore](https://github.com/smallstep/truststore) (the Go reference
+implementations). Facts and algorithms were learned from those projects; the code here is
+our own. See [docs/PRIOR-ART.md](https://github.com/sylin-org/os-tools/blob/main/docs/PRIOR-ART.md).
 
 ## License
 

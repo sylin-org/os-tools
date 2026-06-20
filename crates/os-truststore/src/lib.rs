@@ -1,18 +1,35 @@
 //! `os-truststore` — one symmetric API for the operating system's trust store.
 //!
-//! **OS = Operational Symmetry.** Install and remove a CA certificate in the
-//! platform trust store so the operating system — and the applications and tools
-//! that trust it — accept certificates signed by that CA. The API is identical on
-//! every platform; the implementations are mirrors, not copies.
+//! **OS = Operational Symmetry.** Install and remove a CA certificate in the platform
+//! trust store so the OS — and the applications and tools that trust it — accept
+//! certificates signed by that CA. The API is identical on every platform; the
+//! implementations are mirrors, not copies.
 //!
-//! Platform support (v0.1.0):
-//! - **Linux** (Debian/Ubuntu): copies to `/usr/local/share/ca-certificates/` and
-//!   runs `update-ca-certificates`.
-//! - **Windows**: `certutil -addstore Root`.
-//! - **macOS**: `security add-trusted-cert` with the System keychain.
+//! The certificate **is** the identity — you install, query, and remove with the same
+//! [`Cert`], and the crate derives a stable identity (SHA-256 of the DER) internally. No
+//! names to invent or track.
 //!
-//! Installing into the system store requires elevated privileges. Errors are
-//! returned, never panicked — callers should warn and continue.
+//! ```no_run
+//! let bytes = std::fs::read("my-root-ca.pem")?;
+//! let ca = os_truststore::Cert::from_pem(&bytes)?;   // validates "is this a CA?"
+//!
+//! os_truststore::install(&ca)?;                        // system store; needs elevation
+//! assert!(os_truststore::is_installed(&ca)?);
+//! os_truststore::uninstall(&ca)?;                      // Ok even if already absent
+//! # Ok::<(), os_truststore::TrustError>(())
+//! ```
+//!
+//! Installing into the **system** store needs elevation; without it you get a typed
+//! [`TrustError::NeedsElevation`] (never a silent narrower install). If you only need
+//! *your own* `rustls`/`reqwest` client to trust the CA — no elevation, no OS store, works
+//! everywhere — enable the `rustls` feature and use the `inprocess` module.
+
+mod cert;
+mod detect;
+mod error;
+
+#[cfg(feature = "rustls")]
+pub mod inprocess;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -23,366 +40,213 @@ mod darwin;
 #[cfg(windows)]
 mod windows;
 
-#[derive(Debug, thiserror::Error)]
-pub enum TrustStoreError {
-    #[error("trust store command failed: {0}")]
-    CommandFailed(String),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("invalid certificate name: {0}")]
-    InvalidName(String),
-    #[error("invalid certificate: {0}")]
-    InvalidCertificate(String),
-    #[error("platform not supported")]
-    Unsupported,
+pub use cert::Cert;
+pub use error::{Result, TrustError};
+
+/// Which trust store to target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// The machine-wide system store (default). Requires elevation to modify.
+    #[default]
+    System,
+    /// The current user's store (no elevation): the CurrentUser `ROOT` store on Windows,
+    /// the login keychain on macOS. On Linux there is no per-user system trust store, so
+    /// this behaves the same as [`Scope::System`]; use the `inprocess` module for
+    /// per-process trust without privileges.
+    CurrentUser,
 }
 
-/// A parsed and validated CA certificate, ready to install.
+/// The outcome of a successful install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Report {
+    /// The certificate was installed.
+    Installed,
+    /// The certificate was already present — nothing to do (idempotent).
+    AlreadyInstalled,
+    /// The certificate was added to the store, but trust could not be confirmed (macOS:
+    /// admin-domain trust needs interactive authorization). `reason` explains.
+    InstalledNotTrusted {
+        /// Why trust could not be confirmed.
+        reason: String,
+    },
+}
+
+/// Install `cert` into the system trust store (the common case).
 ///
-/// Produced by [`parse_ca_cert`]: the PEM has been re-encoded canonically (so
-/// what we install is exactly what we parsed) and the DER bytes are available for
-/// fingerprinting by the caller.
+/// Idempotent. Requires elevation; returns [`TrustError::NeedsElevation`] otherwise. For
+/// options (scope, display label) use [`Install`].
+pub fn install(cert: &Cert) -> Result<Report> {
+    Install::new(cert).run()
+}
+
+/// Remove `cert` from the system trust store. `Ok(())` even if it was not present.
+pub fn uninstall(cert: &Cert) -> Result<()> {
+    dispatch_uninstall(cert, Scope::System)
+}
+
+/// Whether `cert` is present in the system trust store.
+pub fn is_installed(cert: &Cert) -> Result<bool> {
+    dispatch_is_installed(cert, Scope::System)
+}
+
+/// Builder for [`install`] with options.
+///
+/// ```no_run
+/// # let ca = os_truststore::Cert::from_pem(b"").unwrap();
+/// os_truststore::Install::new(&ca)
+///     .scope(os_truststore::Scope::CurrentUser)  // no-elevation per-user (Windows/macOS)
+///     .label("My Org Root")                      // display name where supported
+///     .run()?;
+/// # Ok::<(), os_truststore::TrustError>(())
+/// ```
 #[derive(Debug, Clone)]
-pub struct ParsedCaCert {
-    /// Canonical single-cert PEM (re-encoded from the parsed DER).
-    pub pem: String,
-    /// DER bytes of the certificate (input to a SHA-256 fingerprint).
-    pub der: Vec<u8>,
+pub struct Install<'a> {
+    cert: &'a Cert,
+    scope: Scope,
+    label: Option<String>,
 }
 
-/// Parse a PEM string and verify it is a CA certificate.
-///
-/// Rejects, with a clear message:
-/// - input that is not a parseable `CERTIFICATE` PEM block ("garbage");
-/// - a certificate that is **not** a CA (no `CA:TRUE` basic constraint) — this is
-///   the gate that stops a user from installing a server/leaf cert as a root.
-///
-/// On success returns the canonical PEM + DER so the caller controls what gets
-/// installed and how it is fingerprinted.
-pub fn parse_ca_cert(cert_pem: &str) -> Result<ParsedCaCert, TrustStoreError> {
-    use x509_parser::certificate::X509Certificate;
-    use x509_parser::prelude::FromDer;
-
-    // 1. Parse the PEM envelope. Must be a CERTIFICATE block. Fully-qualify the
-    // `pem` crate so it is not shadowed by any `pem` symbol in scope.
-    let parsed = ::pem::parse(cert_pem).map_err(|e| {
-        TrustStoreError::InvalidCertificate(format!("not a valid PEM document: {e}"))
-    })?;
-    if parsed.tag() != "CERTIFICATE" {
-        return Err(TrustStoreError::InvalidCertificate(format!(
-            "expected a CERTIFICATE PEM block, found {:?}",
-            parsed.tag()
-        )));
-    }
-    let der = parsed.contents().to_vec();
-
-    // 2. Parse the X.509 structure.
-    let (_, cert) = X509Certificate::from_der(&der).map_err(|e| {
-        TrustStoreError::InvalidCertificate(format!("not a valid X.509 certificate: {e}"))
-    })?;
-
-    // 3. Reject a non-CA cert. BasicConstraints CA flag must be present and true.
-    let is_ca = match cert.basic_constraints() {
-        Ok(Some(bc)) => bc.value.ca,
-        _ => false,
-    };
-    if !is_ca {
-        return Err(TrustStoreError::InvalidCertificate(
-            "not a CA certificate (no CA basic constraint)".to_string(),
-        ));
+impl<'a> Install<'a> {
+    /// Start an install of `cert` (system scope by default).
+    pub fn new(cert: &'a Cert) -> Self {
+        Self {
+            cert,
+            scope: Scope::System,
+            label: None,
+        }
     }
 
-    // Re-encode the PEM canonically so install writes exactly the parsed bytes.
-    let canonical = ::pem::encode(&::pem::Pem::new("CERTIFICATE", der.clone()));
-    Ok(ParsedCaCert {
-        pem: canonical,
-        der,
-    })
+    /// Target a specific [`Scope`].
+    pub fn scope(mut self, scope: Scope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// Set the human-readable display name (where the platform supports a separate name;
+    /// the lookup identity is always the certificate fingerprint).
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Perform the install.
+    pub fn run(self) -> Result<Report> {
+        dispatch_install(self.cert, self.scope, self.label.as_deref())
+    }
 }
 
-/// Validate that a certificate name is safe for use in file paths.
-///
-/// Rejects path separators, null bytes, control characters, `..`, and
-/// names that are empty or excessively long.
-fn validate_name(name: &str) -> Result<(), TrustStoreError> {
-    if name.is_empty() {
-        return Err(TrustStoreError::InvalidName("name is empty".to_string()));
-    }
-    if name.len() > 255 {
-        return Err(TrustStoreError::InvalidName("name too long".to_string()));
-    }
-    if name.contains('/')
-        || name.contains('\\')
-        || name.contains('\0')
-        || name.contains("..")
-        || name.contains(':')
-        || name.contains('*')
-        || name.contains('?')
-    {
-        return Err(TrustStoreError::InvalidName(format!(
-            "name contains forbidden characters: {name}"
-        )));
-    }
-    if name.chars().any(|c| c.is_ascii_control()) {
-        return Err(TrustStoreError::InvalidName(format!(
-            "name contains control characters: {name}"
-        )));
-    }
-    Ok(())
-}
-
-/// Install a PEM-encoded CA certificate into the OS trust store.
-///
-/// `name` is used to construct the filename (e.g., `"my-org-root"` →
-/// `my-org-root.crt` on Linux). The certificate is written to a
-/// platform-appropriate location and the trust store is updated.
-///
-/// This operation typically requires elevated privileges.
-/// Errors are returned but are non-fatal — callers should warn and continue.
-pub fn install_ca_cert(cert_pem: &str, name: &str) -> Result<(), TrustStoreError> {
-    validate_name(name)?;
-
+fn dispatch_install(cert: &Cert, scope: Scope, label: Option<&str>) -> Result<Report> {
     #[cfg(target_os = "linux")]
     {
-        linux::install(cert_pem, name)
+        linux::install(cert, scope, label)
     }
-
-    #[cfg(windows)]
-    {
-        windows::install(cert_pem, name)
-    }
-
     #[cfg(target_os = "macos")]
     {
-        darwin::install(cert_pem, name)
+        darwin::install(cert, scope, label)
     }
-
-    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+    #[cfg(windows)]
     {
-        let _ = (cert_pem, name);
-        Err(TrustStoreError::Unsupported)
+        windows::install(cert, scope, label)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (cert, scope, label);
+        Err(TrustError::Unsupported)
     }
 }
 
-/// Remove a CA certificate from the OS trust store by `name`.
-///
-/// The inverse of [`install_ca_cert`]: removes the cert this `name` installed.
-/// Per platform:
-/// - **Linux**: deletes `/usr/local/share/ca-certificates/<name>.crt` and runs
-///   `update-ca-certificates --fresh`;
-/// - **Windows**: `certutil -delstore Root <name>`;
-/// - **macOS**: `security delete-certificate -c <name>` on the System keychain.
-///
-/// Typically requires elevated privileges. This crate only ever removes roots the
-/// caller installed by `name` — it never enumerates or modifies the OS store
-/// wholesale.
-pub fn remove_ca_cert(name: &str) -> Result<(), TrustStoreError> {
-    validate_name(name)?;
-
+fn dispatch_uninstall(cert: &Cert, scope: Scope) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        linux::remove(name)
+        linux::uninstall(cert, scope)
     }
-
-    #[cfg(windows)]
-    {
-        windows::remove(name)
-    }
-
     #[cfg(target_os = "macos")]
     {
-        darwin::remove(name)
+        darwin::uninstall(cert, scope)
     }
-
-    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+    #[cfg(windows)]
     {
-        let _ = name;
-        Err(TrustStoreError::Unsupported)
+        windows::uninstall(cert, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (cert, scope);
+        Err(TrustError::Unsupported)
     }
 }
 
-/// Best-effort check if a CA certificate with the given name is installed.
-///
-/// Returns `false` if the check fails or the platform is unsupported.
-pub fn is_ca_installed(name: &str) -> bool {
-    if validate_name(name).is_err() {
-        return false;
-    }
-
+fn dispatch_is_installed(cert: &Cert, scope: Scope) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
-        linux::is_installed(name)
+        linux::is_installed(cert, scope)
     }
-
-    #[cfg(windows)]
-    {
-        windows::is_installed(name)
-    }
-
     #[cfg(target_os = "macos")]
     {
-        darwin::is_installed(name)
+        darwin::is_installed(cert, scope)
     }
-
-    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+    #[cfg(windows)]
     {
-        let _ = name;
-        false
+        windows::is_installed(cert, scope)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (cert, scope);
+        Err(TrustError::Unsupported)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 
-    // ── Error type tests ───────────────────────────────────────────────
-
-    #[test]
-    fn error_command_failed_display() {
-        let err = TrustStoreError::CommandFailed("certutil exit code 1: access denied".to_string());
-        let msg = err.to_string();
-        assert!(msg.contains("certutil"), "message: {msg}");
-        assert!(msg.contains("access denied"), "message: {msg}");
+    fn gen_ca() -> Cert {
+        let mut p = CertificateParams::new(vec![]).unwrap();
+        p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        p.distinguished_name
+            .push(rcgen::DnType::CommonName, "os-truststore test root");
+        let k = KeyPair::generate().unwrap();
+        Cert::from_pem(p.self_signed(&k).unwrap().pem()).unwrap()
     }
 
     #[test]
-    fn error_io_display() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
-        let err = TrustStoreError::from(io_err);
-        let msg = err.to_string();
-        assert!(msg.contains("permission denied"), "message: {msg}");
-    }
-
-    #[test]
-    fn error_unsupported_display() {
-        let err = TrustStoreError::Unsupported;
-        assert!(err.to_string().contains("not supported"));
-    }
-
-    #[test]
-    fn error_is_debug() {
-        let err = TrustStoreError::CommandFailed("test".to_string());
-        let debug = format!("{err:?}");
-        assert!(debug.contains("CommandFailed"));
-    }
-
-    // ── is_ca_installed ────────────────────────────────────────────────
-
-    #[test]
-    fn is_ca_installed_returns_bool() {
-        // Should not panic regardless of whether the cert exists
-        let result = is_ca_installed("nonexistent-cert-for-os-truststore-test");
-        assert!(!result, "a nonexistent cert should not be installed");
-    }
-
-    // ── install_ca_cert ────────────────────────────────────────────────
-
-    #[test]
-    fn install_ca_cert_with_invalid_pem_does_not_panic() {
-        // The function may fail (command errors, permission denied) but should
-        // never panic. We only verify it returns a Result, not that it succeeds.
-        let result = install_ca_cert("not-a-real-pem", "os-truststore-test-invalid");
-        // On CI/test environments this will likely fail with permission errors
-        // or command errors, which is expected and fine.
-        assert!(result.is_ok() || result.is_err());
-    }
-
-    // ── parse_ca_cert: CA validation ───────────────────────────────────
-
-    /// Self-signed CA certificate PEM (BasicConstraints CA:TRUE).
-    fn make_ca_pem() -> String {
-        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
-        let mut params = CertificateParams::default();
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-        let key = KeyPair::generate().unwrap();
-        params.self_signed(&key).unwrap().pem()
-    }
-
-    /// Self-signed leaf/server certificate PEM (no CA basic constraint).
-    fn make_leaf_pem() -> String {
-        use rcgen::{CertificateParams, KeyPair};
-        let params = CertificateParams::new(vec!["leaf.example.com".to_string()]).unwrap();
-        let key = KeyPair::generate().unwrap();
-        params.self_signed(&key).unwrap().pem()
-    }
-
-    #[test]
-    fn parse_ca_cert_accepts_a_ca() {
-        let pem = make_ca_pem();
-        let parsed = parse_ca_cert(&pem).expect("a real CA cert should parse");
-        assert!(!parsed.der.is_empty());
-        assert!(parsed.pem.contains("BEGIN CERTIFICATE"));
-    }
-
-    #[test]
-    fn parse_ca_cert_rejects_a_non_ca_leaf() {
-        let pem = make_leaf_pem();
-        let err = parse_ca_cert(&pem).expect_err("a leaf cert must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not a CA certificate"),
-            "expected CA-constraint rejection, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn parse_ca_cert_rejects_garbage() {
-        let err = parse_ca_cert("this is not a pem at all").expect_err("garbage must be rejected");
-        assert!(matches!(err, TrustStoreError::InvalidCertificate(_)));
-    }
-
-    #[test]
-    fn parse_ca_cert_rejects_non_certificate_pem_block() {
-        // A valid PEM document, but the wrong block type.
-        let pem = "-----BEGIN PRIVATE KEY-----\nbm90LWEtcmVhbC1rZXk=\n-----END PRIVATE KEY-----\n";
-        let err = parse_ca_cert(pem).expect_err("a non-CERTIFICATE block must be rejected");
-        assert!(matches!(err, TrustStoreError::InvalidCertificate(_)));
-    }
-
-    #[test]
-    fn error_invalid_certificate_display() {
-        let err = TrustStoreError::InvalidCertificate("not a CA certificate".to_string());
-        assert!(err.to_string().contains("not a CA certificate"));
-    }
-
-    // ── name validation ────────────────────────────────────────────────
-
-    #[test]
-    fn validate_name_rejects_path_traversal_and_separators() {
-        for bad in ["", "../evil", "a/b", "a\\b", "a:b", "a*b", "a?b", "a\0b"] {
-            assert!(
-                validate_name(bad).is_err(),
-                "name {bad:?} should be rejected"
-            );
+    fn fresh_ca_is_not_installed_and_install_never_panics() {
+        let ca = gen_ca();
+        // A freshly generated CA must never report as already trusted. Some platforms may
+        // need elevation even to open the store, so tolerate an error — but never a
+        // false positive.
+        if let Ok(present) = is_installed(&ca) {
+            assert!(!present, "a fresh CA must not report as installed");
         }
+        // Must return a Result, never panic. Non-elevated CI typically yields
+        // NeedsElevation / InteractiveAuthRequired — all acceptable.
+        let _ = install(&ca);
     }
 
     #[test]
-    fn validate_name_accepts_a_reasonable_name() {
-        assert!(validate_name("my-org-root").is_ok());
+    fn install_builder_defaults_to_system() {
+        let ca = gen_ca();
+        let b = Install::new(&ca);
+        assert_eq!(b.scope, Scope::System);
+        assert!(b.label.is_none());
     }
 
-    /// Full install → is_installed → remove round-trip against the real OS trust
-    /// store. Ignored by default: it mutates the system store and requires
-    /// elevated privileges (Administrator / sudo / root). Run explicitly with
-    /// `cargo test -p os-truststore -- --ignored` on a machine where that is safe.
+    /// Full install → verify → remove round-trip against the REAL OS trust store. Mutates
+    /// the system store and needs elevation; run explicitly on a machine where that is
+    /// safe: `cargo test -p os-truststore -- --ignored`.
     #[test]
-    #[ignore = "mutates the OS trust store; needs admin"]
-    fn install_list_remove_round_trip() {
-        let name = "os-truststore-roundtrip-test";
-        let parsed = parse_ca_cert(&make_ca_pem()).expect("generated CA must validate");
-
-        install_ca_cert(&parsed.pem, name).expect("install should succeed with admin rights");
-        // Linux can verify by filename; other platforms are best-effort.
-        #[cfg(target_os = "linux")]
-        assert!(
-            is_ca_installed(name),
-            "cert should be present after install"
-        );
-
-        remove_ca_cert(name).expect("remove should succeed");
-        #[cfg(target_os = "linux")]
-        assert!(!is_ca_installed(name), "cert should be gone after remove");
+    #[ignore = "mutates the OS trust store; needs admin/root"]
+    fn install_verify_remove_round_trip() {
+        let ca = gen_ca();
+        let report = install(&ca).expect("install should succeed with privileges");
+        assert!(matches!(
+            report,
+            Report::Installed | Report::AlreadyInstalled | Report::InstalledNotTrusted { .. }
+        ));
+        assert!(is_installed(&ca).expect("query should succeed"));
+        uninstall(&ca).expect("remove should succeed");
+        assert!(!is_installed(&ca).expect("query should succeed"));
     }
 }

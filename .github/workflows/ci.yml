@@ -53,5 +53,44 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.74.0
+      - uses: dtolnay/rust-toolchain@1.78.0
       - run: cargo check --all-features --locked
+
+  # Exercise the REAL Linux install round-trip (the #[ignore]d test) as root in each
+  # distro family — the cross-distro proof of the exhaust-all-methods orchestrator.
+  # alpine (musl rustup) and openSUSE (Tier-3 anchor-dir, see docs/PRIOR-ART.md) are
+  # allowed to fail until verified; Debian/Fedora/Arch gate.
+  linux-distros:
+    name: distro (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:stable
+            setup: apt-get update && apt-get install -y ca-certificates curl gcc
+          - image: fedora:latest
+            setup: dnf install -y ca-certificates curl gcc
+          - image: archlinux:latest
+            setup: pacman -Sy --noconfirm ca-certificates p11-kit curl gcc
+          - image: alpine:latest
+            setup: apk add --no-cache ca-certificates curl build-base
+            experimental: true
+          - image: opensuse/tumbleweed:latest
+            setup: zypper --non-interactive install ca-certificates curl gcc tar gzip
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install distro packages
+        run: ${{ matrix.setup }}
+        shell: sh
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        shell: sh
+      - name: Real install round-trip (running as root in the container)
+        run: . "$HOME/.cargo/env" && cargo test --locked -- --include-ignored
+        shell: sh
