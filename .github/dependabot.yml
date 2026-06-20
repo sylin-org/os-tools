@@ -10,3 +10,7 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    ignore:
+      # dtolnay/rust-toolchain's tags are Rust versions; the MSRV job pins one
+      # intentionally. Don't let dependabot chase it (it tried 1.78 -> 1.100).
+      - dependency-name: "dtolnay/rust-toolchain"

@@ -6,7 +6,9 @@ members = ["crates/os-truststore"]
 version = "0.0.1"
 authors = ["Sylin.org <hello@sylin.org>"]
 edition = "2021"
-rust-version = "1.78"
+# MSRV is bounded by transitive deps (the `time` crate pulled via x509-parser requires
+# 1.88); verified by the `msrv` CI job. The crate's own code targets edition 2021.
+rust-version = "1.88"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/sylin-org/os-tools"
 homepage = "https://github.com/sylin-org/os-tools"
