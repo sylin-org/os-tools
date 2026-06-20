@@ -62,7 +62,7 @@ If you only need *your own* `rustls`/`reqwest` client to trust the CA, skip the 
 entirely. This works on every platform with no privileges:
 
 ```rust
-// os-truststore = { version = "0.1", features = ["rustls"] }
+// os-truststore = { version = "0.0.1", features = ["rustls"] }
 let roots = os_truststore::inprocess::rustls_root_store(&ca)?;
 let config = rustls::ClientConfig::builder()
     .with_root_certificates(roots)
