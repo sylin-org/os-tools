@@ -18,7 +18,7 @@ homepage = "https://github.com/sylin-org/os-tools"
 tracing = "0.1"
 thiserror = "2"
 pem = "3"
-x509-parser = "0.16"
+x509-parser = "0.18"
 sha2 = "0.10"
 rcgen = "0.13"
 # Platform / feature-gated (used per-target or behind a feature in member crates).
