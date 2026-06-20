@@ -4,16 +4,11 @@ All notable changes to the `os-tools` family are documented here. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crates follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Planned (os-truststore)
-
-- **NSS** (Firefox/Chrome) and **Java** keystores as opt-in, soft-fail backends behind
-  features.
-- p11-kit `trust anchor --store` as an alternative one-step Linux path.
-- Hands-on verification of the openSUSE anchor dir and FreeBSD support (see PRIOR-ART.md).
-
 ## [0.0.1] — 2026-06-19
+
+First crates.io release of `os-truststore`. (Roadmap — NSS/Java backends, p11-kit
+`trust anchor`, openSUSE/FreeBSD verification — is tracked in
+[docs/PRIOR-ART.md](docs/PRIOR-ART.md) and the [ADR](docs/adr/0001-os-truststore-orchestrator.md).)
 
 ### Added
 
@@ -39,5 +34,4 @@ All notable changes to the `os-tools` family are documented here. The format is 
 - [docs/PRIOR-ART.md](docs/PRIOR-ART.md): cited, version-specific, adversarially-reviewed
   prior-art harvest behind the design; [docs/adr/0001-os-truststore-orchestrator.md](docs/adr/0001-os-truststore-orchestrator.md).
 
-[Unreleased]: https://github.com/sylin-org/os-tools/compare/v0.0.1...HEAD
 [0.0.1]: https://github.com/sylin-org/os-tools/releases/tag/v0.0.1
