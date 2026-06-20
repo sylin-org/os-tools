@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/os-truststore"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Sylin.org <hello@sylin.org>"]
 edition = "2021"
 # MSRV is bounded by transitive deps (the `time` crate pulled via x509-parser requires

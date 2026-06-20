@@ -12,7 +12,7 @@ changes — Windows one way, macOS another, Linux a third.
 
 | Crate | What it does | Status |
 | --- | --- | --- |
-| [`os-truststore`](crates/os-truststore) | Install / remove a CA certificate in the OS trust store. To the **trust** store what [`keyring`](https://crates.io/crates/keyring) is to the **secret** store — the missing symmetric *writer*. | `0.0.1` |
+| [`os-truststore`](crates/os-truststore) | Install / remove a CA certificate in the OS trust store. To the **trust** store what [`keyring`](https://crates.io/crates/keyring) is to the **secret** store — the missing symmetric *writer*. | `0.0.2` |
 
 ## Why
 

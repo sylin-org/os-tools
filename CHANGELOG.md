@@ -4,11 +4,26 @@ All notable changes to the `os-tools` family are documented here. The format is 
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the crates follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.2] — 2026-06-20
+
+First **published** crates.io release. (0.0.1 was tagged but its publish was blocked by the
+macOS CI hang fixed below.)
+
+### Fixed
+
+- **MSRV** is declared as **1.88** — bounded by the transitive `time` crate (via
+  `x509-parser`); 0.0.1's declared 1.78 was incorrect.
+- **macOS** — every `security` call (install, uninstall, and the `find-certificate` read)
+  is now time-bounded (10s): a headless trust-authorization prompt returns
+  `InteractiveAuthRequired` (or a best-effort `Ok(false)` for the read) instead of hanging
+  forever. This is what stalled the 0.0.1 release.
+- dependabot no longer chases the intentional `dtolnay/rust-toolchain` MSRV pin.
+
 ## [0.0.1] — 2026-06-19
 
-First crates.io release of `os-truststore`. (Roadmap — NSS/Java backends, p11-kit
-`trust anchor`, openSUSE/FreeBSD verification — is tracked in
-[docs/PRIOR-ART.md](docs/PRIOR-ART.md) and the [ADR](docs/adr/0001-os-truststore-orchestrator.md).)
+Initial tag — superseded by 0.0.2 (its publish was blocked by the macOS CI hang). Roadmap —
+NSS/Java backends, p11-kit `trust anchor`, openSUSE/FreeBSD verification — is tracked in
+[docs/PRIOR-ART.md](docs/PRIOR-ART.md) and the [ADR](docs/adr/0001-os-truststore-orchestrator.md).
 
 ### Added
 
@@ -34,4 +49,5 @@ First crates.io release of `os-truststore`. (Roadmap — NSS/Java backends, p11-
 - [docs/PRIOR-ART.md](docs/PRIOR-ART.md): cited, version-specific, adversarially-reviewed
   prior-art harvest behind the design; [docs/adr/0001-os-truststore-orchestrator.md](docs/adr/0001-os-truststore-orchestrator.md).
 
+[0.0.2]: https://github.com/sylin-org/os-tools/releases/tag/v0.0.2
 [0.0.1]: https://github.com/sylin-org/os-tools/releases/tag/v0.0.1
