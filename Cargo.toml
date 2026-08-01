@@ -17,7 +17,7 @@ homepage = "https://github.com/sylin-org/os-tools"
 [workspace.dependencies]
 tracing = "0.1"
 thiserror = "2"
-pem = "3"
+pem = "4"
 x509-parser = "0.16"
 sha2 = "0.10"
 rcgen = "0.13"
